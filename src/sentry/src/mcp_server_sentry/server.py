@@ -1,6 +1,7 @@
 import asyncio
 from dataclasses import dataclass
-from urllib.parse import urlparse
+from typing import List, Optional
+from urllib.parse import urlparse, urlencode
 
 import click
 import httpx
@@ -49,6 +50,73 @@ Event Count: {self.count}
                 )
             ],
         )
+
+    def to_tool_result(self) -> list[types.TextContent | types.ImageContent | types.EmbeddedResource]:
+        return [types.TextContent(type="text", text=self.to_text())]
+
+
+@dataclass
+class SentryIssueListItem:
+    title: str
+    issue_id: str
+    status: str
+    level: str
+    first_seen: str
+    last_seen: str
+    count: int
+    permalink: str
+    project: str
+
+    @classmethod
+    def from_api_response(cls, issue: dict) -> "SentryIssueListItem":
+        return cls(
+            title=issue.get("title", "Unknown Title"),
+            issue_id=str(issue.get("id", "Unknown")),
+            status=issue.get("status", "Unknown"),
+            level=issue.get("level", "Unknown"),
+            first_seen=issue.get("firstSeen", "Unknown"),
+            last_seen=issue.get("lastSeen", "Unknown"),
+            count=issue.get("count", 0),
+            permalink=issue.get("permalink", ""),
+            project=issue.get("project", {}).get("slug", "Unknown Project")
+        )
+
+
+@dataclass
+class SentryIssuesList:
+    issues: List[SentryIssueListItem]
+    total_count: int
+    query_filters: Optional[dict] = None
+
+    def to_text(self) -> str:
+        if not self.issues:
+            return "No issues found matching your criteria."
+        
+        filter_text = ""
+        if self.query_filters:
+            filter_text = "Filters applied: "
+            filter_parts = []
+            for key, value in self.query_filters.items():
+                if value:
+                    filter_parts.append(f"{key}={value}")
+            filter_text += ", ".join(filter_parts)
+            filter_text += "\n\n"
+        
+        header = f"Found {self.total_count} Sentry issues. Showing {len(self.issues)} results.\n{filter_text}"
+        
+        issue_texts = []
+        for idx, issue in enumerate(self.issues, 1):
+            issue_text = (
+                f"{idx}. Issue: {issue.title}\n"
+                f"   ID: {issue.issue_id}\n"
+                f"   Project: {issue.project}\n"
+                f"   Status: {issue.status} | Level: {issue.level}\n"
+                f"   Events: {issue.count} | First seen: {issue.first_seen} | Last seen: {issue.last_seen}\n"
+                f"   URL: {issue.permalink}\n"
+            )
+            issue_texts.append(issue_text)
+        
+        return header + "\n" + "\n".join(issue_texts)
 
     def to_tool_result(self) -> list[types.TextContent | types.ImageContent | types.EmbeddedResource]:
         return [types.TextContent(type="text", text=self.to_text())]
@@ -188,6 +256,134 @@ async def handle_sentry_issue(
         raise McpError(f"An error occurred: {str(e)}")
 
 
+async def query_sentry_issues(
+    http_client: httpx.AsyncClient, 
+    auth_token: str, 
+    query: Optional[str] = None, 
+    status: Optional[str] = None,
+    level: Optional[str] = None,
+    project: Optional[str] = None,
+    limit: int = 10
+) -> SentryIssuesList:
+    """
+    Query Sentry issues based on various filters.
+    
+    Args:
+        http_client: HTTPX client with base URL set
+        auth_token: Sentry auth token
+        query: Optional search query
+        status: Optional status filter (unresolved, resolved, ignored)
+        level: Optional error level filter (error, warning, info)
+        project: Optional project identifier
+        limit: Maximum number of issues to return (default 10)
+        
+    Returns:
+        SentryIssuesList: A list of issues matching the query
+    """
+    try:
+        # Build query parameters
+        params = {}
+        if query:
+            params["query"] = query
+        if status:
+            params["status"] = status
+        if level:
+            params["level"] = level
+        if project:
+            params["project"] = project
+        
+        # Set pagination
+        params["limit"] = limit
+        
+        # Build URL with query parameters
+        url = f"projects/issues/?{urlencode(params)}"
+        
+        # Make API request
+        response = await http_client.get(
+            url, headers={"Authorization": f"Bearer {auth_token}"}
+        )
+        
+        if response.status_code == 401:
+            raise McpError("Error: Unauthorized. Please check your Sentry authentication token.")
+        
+        response.raise_for_status()
+        issues_data = response.json()
+        
+        # Parse response
+        issues = []
+        for issue in issues_data:
+            issues.append(SentryIssueListItem.from_api_response(issue))
+        
+        return SentryIssuesList(
+            issues=issues,
+            total_count=len(issues),  # In real implementation, this would come from pagination info
+            query_filters={
+                "query": query,
+                "status": status,
+                "level": level,
+                "project": project
+            }
+        )
+        
+    except httpx.HTTPStatusError as e:
+        raise McpError(f"Error querying Sentry issues: {str(e)}")
+    except Exception as e:
+        raise McpError(f"An error occurred: {str(e)}")
+
+
+async def list_latest_sentry_issues(
+    http_client: httpx.AsyncClient,
+    auth_token: str,
+    limit: int = 10
+) -> SentryIssuesList:
+    """
+    List the most recent Sentry issues.
+    
+    Args:
+        http_client: HTTPX client with base URL set
+        auth_token: Sentry auth token
+        limit: Maximum number of issues to return (default 10)
+        
+    Returns:
+        SentryIssuesList: A list of the most recent issues
+    """
+    try:
+        # Build URL with query parameters to sort by most recent
+        params = {
+            "limit": limit,
+            "sort": "date",  # Sort by date - most recent first
+            "statsPeriod": "14d"  # Get issues from the last 14 days
+        }
+        
+        url = f"issues/?{urlencode(params)}"
+        
+        # Make API request
+        response = await http_client.get(
+            url, headers={"Authorization": f"Bearer {auth_token}"}
+        )
+        
+        if response.status_code == 401:
+            raise McpError("Error: Unauthorized. Please check your Sentry authentication token.")
+        
+        response.raise_for_status()
+        issues_data = response.json()
+        
+        # Parse response
+        issues = []
+        for issue in issues_data:
+            issues.append(SentryIssueListItem.from_api_response(issue))
+        
+        return SentryIssuesList(
+            issues=issues,
+            total_count=len(issues)
+        )
+        
+    except httpx.HTTPStatusError as e:
+        raise McpError(f"Error listing Sentry issues: {str(e)}")
+    except Exception as e:
+        raise McpError(f"An error occurred: {str(e)}")
+
+
 async def serve(auth_token: str) -> Server:
     server = Server("sentry")
     http_client = httpx.AsyncClient(base_url=SENTRY_API_BASE)
@@ -240,6 +436,61 @@ async def serve(auth_token: str) -> Server:
                     },
                     "required": ["issue_id_or_url"]
                 }
+            ),
+            types.Tool(
+                name="query_sentry_issues",
+                description="""Search for Sentry issues with filters. Use this tool when you need to:
+                - Find issues matching specific search terms
+                - Filter issues by status (unresolved, resolved, ignored)
+                - Filter issues by level (error, warning, info)
+                - Find issues in a specific project
+                - Get a list of issues that match certain criteria""",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Search query to find specific issues"
+                        },
+                        "status": {
+                            "type": "string",
+                            "description": "Filter by status (unresolved, resolved, ignored)",
+                            "enum": ["unresolved", "resolved", "ignored"]
+                        },
+                        "level": {
+                            "type": "string",
+                            "description": "Filter by error level (error, warning, info)",
+                            "enum": ["error", "warning", "info"]
+                        },
+                        "project": {
+                            "type": "string",
+                            "description": "Filter by project identifier"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of issues to return",
+                            "default": 10
+                        }
+                    }
+                }
+            ),
+            types.Tool(
+                name="list_latest_sentry_issues",
+                description="""List the most recent Sentry issues. Use this tool when you need to:
+                - Check what errors have occurred recently
+                - Get a quick overview of the current error status
+                - See the most recent issues without specific filtering
+                - Monitor for new issues""",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of issues to return",
+                            "default": 10
+                        }
+                    }
+                }
             )
         ]
 
@@ -247,14 +498,45 @@ async def serve(auth_token: str) -> Server:
     async def handle_call_tool(
         name: str, arguments: dict | None
     ) -> list[types.TextContent | types.ImageContent | types.EmbeddedResource]:
-        if name != "get_sentry_issue":
+        if name == "get_sentry_issue":
+            if not arguments or "issue_id_or_url" not in arguments:
+                raise ValueError("Missing issue_id_or_url argument")
+
+            issue_data = await handle_sentry_issue(http_client, auth_token, arguments["issue_id_or_url"])
+            return issue_data.to_tool_result()
+            
+        elif name == "query_sentry_issues":
+            arguments = arguments or {}
+            query = arguments.get("query")
+            status = arguments.get("status")
+            level = arguments.get("level")
+            project = arguments.get("project")
+            limit = arguments.get("limit", 10)
+            
+            issues_list = await query_sentry_issues(
+                http_client, 
+                auth_token, 
+                query=query, 
+                status=status, 
+                level=level, 
+                project=project, 
+                limit=limit
+            )
+            return issues_list.to_tool_result()
+            
+        elif name == "list_latest_sentry_issues":
+            arguments = arguments or {}
+            limit = arguments.get("limit", 10)
+            
+            issues_list = await list_latest_sentry_issues(
+                http_client,
+                auth_token,
+                limit=limit
+            )
+            return issues_list.to_tool_result()
+        
+        else:
             raise ValueError(f"Unknown tool: {name}")
-
-        if not arguments or "issue_id_or_url" not in arguments:
-            raise ValueError("Missing issue_id_or_url argument")
-
-        issue_data = await handle_sentry_issue(http_client, auth_token, arguments["issue_id_or_url"])
-        return issue_data.to_tool_result()
 
     return server
 
