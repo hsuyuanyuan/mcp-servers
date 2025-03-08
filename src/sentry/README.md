@@ -20,6 +20,30 @@ A Model Context Protocol server for retrieving and analyzing issues from Sentry.
      - Event count
      - Full stacktrace
 
+2. `query_sentry_issues`
+   - Search for Sentry issues with filters
+   - Input:
+     - `query` (string, optional): Search query to find specific issues
+     - `status` (string, optional): Filter by status (unresolved, resolved, ignored)
+     - `level` (string, optional): Filter by error level (error, warning, info)
+     - `project` (string, optional): Filter by project identifier
+     - `limit` (integer, optional): Maximum number of issues to return (default: 10)
+   - Returns: List of issues matching the criteria, including:
+     - Title
+     - Issue ID
+     - Project name
+     - Status
+     - Level
+     - Event count
+     - First/last seen timestamps
+     - Issue URL
+
+3. `list_latest_sentry_issues`
+   - List the most recent Sentry issues
+   - Input:
+     - `limit` (integer, optional): Maximum number of issues to return (default: 10)
+   - Returns: List of the most recent issues with the same fields as above
+
 ### Prompts
 
 1. `sentry-issue`
@@ -128,6 +152,26 @@ Add to your Zed settings.json:
 },
 ```
 </details>
+
+## Examples
+
+### Retrieving a specific issue
+
+```
+Use the get_sentry_issue tool to examine the details of issue 1234567890
+```
+
+### Querying issues with filters
+
+```
+Use the query_sentry_issues tool to find all unresolved error-level issues containing the text "database connection"
+```
+
+### Listing the most recent issues
+
+```
+Use the list_latest_sentry_issues tool to show me the 5 most recent Sentry issues
+```
 
 ## Debugging
 
